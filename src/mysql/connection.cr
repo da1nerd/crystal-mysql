@@ -34,10 +34,11 @@ class MySql::Connection < DB::Connection
       @socket = io
       handshake = read_packet(Protocol::HandshakeV10)
 
-      # TODO: only request SSL if the server supports it and the code requests it.
+      # TODO: only request SSL if the server supports it and the user requested it.
       write_packet(1) do |packet|
         Protocol::SSLRequest.new(username, password, initial_catalog, handshake.auth_plugin_data).write(packet)
       end
+      # TODO: fix negotiating ssl
       negotiate_ssl
 
       write_packet(1) do |packet|
