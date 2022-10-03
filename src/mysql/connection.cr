@@ -1,9 +1,12 @@
 require "socket"
+require "openssl"
+require "../ext/openssl"
 
 class MySql::Connection < DB::Connection
   def initialize(context : DB::ConnectionContext)
     super(context)
-    @socket = uninitialized TCPSocket
+    @mutex = Mutex.new
+    @socket = uninitialized TCPSocket | OpenSSL::SSL::Socket::Client
 
     begin
       host = context.uri.hostname || raise "no host provided"
@@ -18,8 +21,24 @@ class MySql::Connection < DB::Connection
         initial_catalog = nil
       end
 
-      @socket = TCPSocket.new(host, port)
+      io = TCPSocket.new(host, port)
+      io.sync = false
+
+      # begin
+      #   io = OpenSSL::SSL::Socket::Client.new(io, context: default_ssl_context, sync_close: true, hostname: host)
+      # rescue exc
+      #   io.close
+      #   raise exc
+      # end
+
+      @socket = io
       handshake = read_packet(Protocol::HandshakeV10)
+
+      # TODO: only request SSL if the server supports it and the code requests it.
+      write_packet(1) do |packet|
+        Protocol::SSLRequest.new(username, password, initial_catalog, handshake.auth_plugin_data).write(packet)
+      end
+      negotiate_ssl
 
       write_packet(1) do |packet|
         Protocol::HandshakeResponse41.new(username, password, initial_catalog, handshake.auth_plugin_data).write(packet)
@@ -28,9 +47,82 @@ class MySql::Connection < DB::Connection
       read_ok_or_err do |packet, status|
         raise "packet #{status} not implemented"
       end
-    rescue IO::Error
+    rescue e : IO::Error
+      puts e.message
+      puts e.backtrace
       raise DB::ConnectionRefused.new
     end
+  end
+
+  private def negotiate_ssl
+    write_i32 8
+    write_i32 80877103
+    @socket.flush
+
+    if process_ssl_message
+      ctx = OpenSSL::SSL::Context::Client.new
+      ctx.verify_mode = OpenSSL::SSL::VerifyMode::NONE # currently emulating sslmode 'require' not verify_ca or verify_full
+      # if sslcert = @conninfo.sslcert
+      #   ctx.certificate_chain = sslcert
+      # end
+      # if sslkey = @conninfo.sslkey
+      #   ctx.private_key = sslkey
+      # end
+      # if sslrootcert = @conninfo.sslrootcert
+      #   ctx.ca_certificates = sslrootcert
+      # end
+      @socket = OpenSSL::SSL::Socket::Client.new(@socket, context: ctx, sync_close: true)
+    end
+
+    if !@socket.is_a?(OpenSSL::SSL::Socket::Client)
+      close
+      raise "sslmode=require and server did not establish SSL"
+    end
+  end
+
+  private def process_ssl_message : Bool
+    bytes = Bytes.new(1024)
+    read_count = @socket.read(bytes)
+
+    # Make sure there are no surprise, unencrypted data in the socket, potentially from an attacker
+    unless read_count == 1
+      raise "Unexpected data after SSL response:\n#{bytes[0, read_count].hexdump}"
+    end
+
+    case c = bytes[0]
+    when 'S' then true
+    when 'N' then false
+    else
+      raise "Unexpected SSL response from server: #{c.inspect}"
+    end
+  end
+
+  def close
+    synchronize do
+      return if @socket.closed?
+      send_terminate_message
+      @socket.close
+    end
+  end
+
+  def synchronize
+    @mutex.synchronize { yield }
+  end
+
+  private def write_i32(i : Int32)
+    @socket.write_bytes i, IO::ByteFormat::NetworkEndian
+  end
+
+  private def write_i32(i)
+    write_i32 i.to_i32
+  end
+
+  # :nodoc:
+  private def default_ssl_context
+    context = OpenSSL::SSL::Context::Client.new
+    context.ciphers = "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH"
+    context.add_options(OpenSSL::SSL::Options::NO_SSL_V2 | OpenSSL::SSL::Options::NO_SSL_V3)
+    context
   end
 
   def do_close
@@ -54,6 +146,10 @@ class MySql::Connection < DB::Connection
     end
   end
 
+  private def write_chr(chr : Char)
+    @socket.write_byte chr.ord.to_u8
+  end
+
   # :nodoc:
   def read_packet
     packet = build_read_packet
@@ -62,6 +158,11 @@ class MySql::Connection < DB::Connection
     ensure
       packet.discard
     end
+  end
+
+  def send_terminate_message
+    write_chr 'X'
+    write_i32 4
   end
 
   # :nodoc:
