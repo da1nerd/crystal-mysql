@@ -39,7 +39,7 @@ class MySql::Connection < DB::Connection
         Protocol::SSLRequest.new(username, password, initial_catalog, handshake.auth_plugin_data).write(packet)
       end
       # TODO: fix negotiating ssl
-      negotiate_ssl
+      negotiate_ssl(host)
 
       write_packet(1) do |packet|
         Protocol::HandshakeResponse41.new(username, password, initial_catalog, handshake.auth_plugin_data).write(packet)
@@ -55,8 +55,25 @@ class MySql::Connection < DB::Connection
     end
   end
 
-  private def negotiate_ssl
-    write_i32 8
+  private def negotiate_ssl(host)
+    begin
+      @socket = OpenSSL::SSL::Socket::Client.new(@socket, context: default_ssl_context, sync_close: true)
+    rescue e
+      @socket.close
+      raise e
+    end
+    return
+
+    # outline
+    # send ClientHello specifying the highest TLS protocol version supported, a random number, a list of cipher suites, and suggested compression methods.
+    # server responds with ServerHello containing protocal version, random number, cipher suite selections.
+    # server sends Certificate message, depending..
+    # server sends ServerKeyExchange message, depending...
+    # server sends ServerHelloDone message
+    # client sends ClientKeyExchange message, may contain a PreMasterSecret, public key, or nothing depending on the selected cipher.
+    #
+
+    write_i32 8 # handshake type (encrypted_extension)
     write_i32 80877103
     @socket.flush
 
@@ -84,6 +101,8 @@ class MySql::Connection < DB::Connection
   private def process_ssl_message : Bool
     bytes = Bytes.new(1024)
     read_count = @socket.read(bytes)
+
+    puts "Response:\n #{bytes.hexdump}"
 
     # Make sure there are no surprise, unencrypted data in the socket, potentially from an attacker
     unless read_count == 1
@@ -121,6 +140,7 @@ class MySql::Connection < DB::Connection
   # :nodoc:
   private def default_ssl_context
     context = OpenSSL::SSL::Context::Client.new
+    context.verify_mode = OpenSSL::SSL::VerifyMode::NONE
     context.ciphers = "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH"
     context.add_options(OpenSSL::SSL::Options::NO_SSL_V2 | OpenSSL::SSL::Options::NO_SSL_V3)
     context
@@ -153,6 +173,7 @@ class MySql::Connection < DB::Connection
 
   # :nodoc:
   def read_packet
+    puts "read packet"
     packet = build_read_packet
     begin
       yield packet
@@ -168,6 +189,7 @@ class MySql::Connection < DB::Connection
 
   # :nodoc:
   def read_packet(protocol_packet_type)
+    puts "read protocal packet"
     read_packet do |packet|
       return protocol_packet_type.read(packet)
     end

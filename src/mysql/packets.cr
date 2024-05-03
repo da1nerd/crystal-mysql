@@ -63,11 +63,11 @@ module MySql::Protocol
     end
 
     def write(packet : MySql::WritePacket)
-      caps = CLIENT_SSL | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+      caps = CLIENT_SSL# | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
 
-      caps |= CLIENT_PLUGIN_AUTH if @password
-
-      caps |= CLIENT_CONNECT_WITH_DB if @initial_catalog
+      # caps |= CLIENT_PLUGIN_AUTH if @password
+      #
+      # caps |= CLIENT_CONNECT_WITH_DB if @initial_catalog
 
       packet.write_bytes caps, IO::ByteFormat::LittleEndian
 
@@ -108,7 +108,8 @@ module MySql::Protocol
     end
 
     def write(packet : MySql::WritePacket)
-      caps = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+      # TODO: only set CLIENT_SSL if requesting an ssl connection
+      caps = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA | CLIENT_SSL
 
       caps |= CLIENT_PLUGIN_AUTH if @password
 
